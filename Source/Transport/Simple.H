@@ -223,6 +223,89 @@ struct BinaryDiff<eos::SRK>
   }
 };
 
+template <typename EOSType>
+struct BinaryDiffFull
+{
+  AMREX_GPU_HOST_DEVICE
+  AMREX_FORCE_INLINE
+  void operator()(
+    const amrex::Real* Xloc,
+    const amrex::Real* Yloc,
+    const amrex::Real* logT,
+    const amrex::Real /*rholoc*/,
+    const amrex::Real Tloc,
+    amrex::Real* Ddiag,
+    TransParm<EOSType, SimpleTransport> const* tparm)
+  {
+    for (int i = 0; i < NUM_SPECIES*NUM_SPECIES; ++i) {
+      Ddiag[i] = 0.0;
+    }
+
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      for (int j = 0; j < NUM_SPECIES; ++j) {
+        if (i != j) {
+          // cppcheck-suppress knownConditionTrueFalse
+          const int four_idx_ij = 4 * (i * (i + 1) / 2 + j);
+          amrex::Real dbintemp = tparm->fitdbin[four_idx_ij] +
+                                 tparm->fitdbin[four_idx_ij + 1] * logT[0] +
+                                 tparm->fitdbin[four_idx_ij + 2] * logT[1] +
+                                 tparm->fitdbin[four_idx_ij + 3] * logT[2];
+
+          dbintemp = std::exp(dbintemp);
+          Ddiag[i*NUM_SPECIES+j] = dbintemp;
+        }
+      }
+    }
+  }
+};
+
+template <>
+struct BinaryDiffFull<eos::SRK>
+{
+  AMREX_GPU_HOST_DEVICE
+  AMREX_FORCE_INLINE
+  void operator()(
+    const amrex::Real* Xloc,
+    const amrex::Real* Yloc,
+    const amrex::Real* logT,
+    const amrex::Real rholoc,
+    const amrex::Real Tloc,
+    amrex::Real* Ddiag,
+    TransParm<eos::SRK, SimpleTransport> const* tparm)
+  {
+
+    amrex::Real sum_of_Yloc = 0.0;
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      sum_of_Yloc += Yloc[i];
+      Ddiag[i] = 0.0;
+    }
+
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      for (int j = 0; j < NUM_SPECIES; ++j) {
+        if (i != j) {
+          // cppcheck-suppress knownConditionTrueFalse
+          const int idx_ij = 4 * (i * (i + 1) / 2 + j);
+          const int idx_ijk = (i + NUM_SPECIES * j) * NUM_SPECIES;
+          amrex::Real dbintemp = tparm->fitdbin[idx_ij] +
+                                 tparm->fitdbin[idx_ij + 1] * logT[0] +
+                                 tparm->fitdbin[idx_ij + 2] * logT[1] +
+                                 tparm->fitdbin[idx_ij + 3] * logT[2];
+          dbintemp = std::exp(-dbintemp);
+
+          amrex::Real Upsilonij = 0.0;
+          for (int k = 0; k < NUM_SPECIES; ++k) {
+            Upsilonij += tparm->Upsilonijk[idx_ijk + k] * Yloc[k];
+          }
+          // here we have a symmetry
+          Upsilonij = Upsilonij * rholoc * Constants::Avna * M_PI / 12.0 + 1.0;
+          dbintemp *= (Constants::RU * Tloc * Upsilonij) / Constants::PATM;
+          Ddiag[i*NUM_SPECIES+j] = 1.0/dbintemp;
+        }
+      }
+    }
+  }
+};
+
 struct SimpleTransport
 {
   using transport_type = SimpleTransport;
@@ -401,6 +484,124 @@ struct SimpleTransport
       }
     }
   }
+
+  AMREX_GPU_HOST_DEVICE
+  AMREX_FORCE_INLINE static void transport_full(
+    const bool wtr_get_xi,
+    const bool wtr_get_mu,
+    const bool wtr_get_lam,
+    const bool wtr_get_Ddiag,
+    const bool wtr_get_chi,
+    const amrex::Real Tloc,
+    const amrex::Real rholoc,
+    amrex::Real* Yloc,
+    amrex::Real* Ddiag,
+    amrex::Real* chi_mix,
+    amrex::Real& mu,
+    amrex::Real& xi,
+    amrex::Real& lam,
+    TransParm<EosType, transport_type> const* tparm)
+  {
+    amrex::Real trace = 1.e-15;
+    amrex::Real Xloc[NUM_SPECIES] = {0.0};
+    amrex::Real muloc[NUM_SPECIES] = {0.0};
+    amrex::Real xiloc[NUM_SPECIES] = {0.0};
+    amrex::Real logT[NUM_FIT - 1] = {0.0};
+
+    logT[0] = std::log(Tloc);
+    logT[1] = logT[0] * logT[0];
+    logT[2] = logT[0] * logT[1];
+
+    amrex::Real sum = 0.0;
+
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      sum += Yloc[i];
+    }
+
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      Yloc[i] += trace * (sum / NUM_SPECIES - Yloc[i]);
+    }
+
+    amrex::Real wbar = 0.0;
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      wbar += Yloc[i] * tparm->iwt[i];
+    }
+    wbar = 1.0 / wbar;
+    for (int i = 0; i < NUM_SPECIES; ++i) {
+      Xloc[i] = Yloc[i] * wbar * tparm->iwt[i];
+    }
+    if (wtr_get_mu) {
+      for (int i = 0; i < NUM_SPECIES; ++i) {
+        muloc[i] = tparm->fitmu[4 * i] + tparm->fitmu[1 + 4 * i] * logT[0] +
+                   tparm->fitmu[2 + 4 * i] * logT[1] +
+                   tparm->fitmu[3 + 4 * i] * logT[2];
+        muloc[i] = std::exp(muloc[i]);
+      }
+
+      mu = 0.0;
+
+      for (int i = 0; i < NUM_SPECIES; ++i) {
+        mu += Xloc[i] *
+              (muloc[i] * muloc[i] * muloc[i] * muloc[i] * muloc[i] * muloc[i]);
+      }
+      mu = std::cbrt(std::sqrt(mu));
+
+      //  assumption that we only get bulk viscosity if we are already getting
+      //  shear viscosity
+
+      if (wtr_get_xi) {
+        comp_pure_bulk(Tloc, muloc, xiloc, tparm);
+        xi = 0.0;
+        for (int i = 0; i < NUM_SPECIES; ++i) {
+          xi +=
+            Xloc[i] * (std::sqrt(std::sqrt(xiloc[i] * xiloc[i] * xiloc[i])));
+        }
+        xi = std::cbrt(xi * xi * xi * xi);
+      }
+    }
+
+    if (wtr_get_lam) {
+      amrex::Real lamloc[NUM_SPECIES] = {0.0};
+      for (int i = 0; i < NUM_SPECIES; ++i) {
+        lamloc[i] = tparm->fitlam[4 * i] + tparm->fitlam[1 + 4 * i] * logT[0] +
+                    tparm->fitlam[2 + 4 * i] * logT[1] +
+                    tparm->fitlam[3 + 4 * i] * logT[2];
+        lamloc[i] = std::exp(lamloc[i]);
+      }
+
+      lam = 0.0;
+      for (int i = 0; i < NUM_SPECIES; ++i) {
+        lam += Xloc[i] * std::sqrt(std::sqrt(lamloc[i]));
+      }
+      lam = lam * lam * lam * lam;
+    }
+    // Add nonideal corrections if necessary
+    NonIdealChungCorrections<EosType>()(
+      wtr_get_mu, wtr_get_lam, Tloc, Xloc, rholoc, wbar, mu, lam, tparm);
+
+    if (wtr_get_Ddiag) {
+      BinaryDiffFull<EosType>()(Xloc, Yloc, logT, rholoc, Tloc, Ddiag, tparm);
+    }
+
+    if (wtr_get_chi) {
+      for (int n = 0; n < tparm->numLite; ++n) {
+        const int i = tparm->liteSpec[n];
+        for (int j = 0; j < NUM_SPECIES; ++j) {
+          if (j != i) {
+            const int four_idx_nj = 4 * (j + NUM_SPECIES * n);
+            const amrex::Real chi =
+              tparm->fittdrat[four_idx_nj] +
+              Tloc * (tparm->fittdrat[1 + four_idx_nj] +
+                      Tloc * (tparm->fittdrat[2 + four_idx_nj] +
+                              Tloc * (tparm->fittdrat[3 + four_idx_nj])));
+            chi_mix[i] += Xloc[j] * chi;
+          }
+        }
+        chi_mix[i] *= Xloc[i];
+      }
+    }
+  }
+
 
   AMREX_GPU_HOST_DEVICE
   AMREX_FORCE_INLINE static void get_transport_coeffs(
