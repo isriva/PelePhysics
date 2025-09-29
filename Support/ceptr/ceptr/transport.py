@@ -18,9 +18,9 @@ def transport(fstream, mechanism, species_info):
     idx_light_specs = []
     for sp in range(n_species):
         spec = species_info.nonqssa_species[sp]
-        if spec.weight < 5.0:
-            n_lite += 1
-            idx_light_specs.append(spec.idx)
+#        if spec.weight < 5.0:
+        n_lite += 1
+        idx_light_specs.append(spec.idx)
     misc_trans_info(fstream, kk=n_species, n_lite=n_lite)
     wt(fstream, species_info)
     eps(fstream, mechanism, species_info, species_transport)

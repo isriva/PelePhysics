@@ -66,9 +66,9 @@ struct TransParm<EOSType, SimpleTransport>
     GpuArray<amrex::Real, ((NUM_SPECIES * (NUM_SPECIES + 1) * NUM_FIT) / 2)>
       fitdbin = {0.0};
   bool use_soret = false;
-  int numLite = 3;
-  amrex::GpuArray<int, 3> liteSpec = {0};
-  amrex::GpuArray<amrex::Real, NUM_SPECIES * NUM_FIT * 3> fittdrat = {0.0};
+  int numLite = NUM_SPECIES;
+  amrex::GpuArray<int, NUM_SPECIES> liteSpec = {0};
+  amrex::GpuArray<amrex::Real, NUM_SPECIES * NUM_FIT * NUM_SPECIES> fittdrat = {0.0};
   amrex::GpuArray<int, NUM_SPECIES> nlin = {0};
 };
 
